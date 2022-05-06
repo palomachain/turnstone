@@ -1,8 +1,8 @@
+use crate::msg::JobId;
+use cosmwasm_std::{Addr, Uint128};
+use cw_storage_plus::Map;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-use cosmwasm_std::{Addr, Coin};
-use cw_storage_plus::{Item, Map, U32Key};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct State {
@@ -10,10 +10,8 @@ pub struct State {
     pub owner: Addr,
 }
 
-pub const STATE: Item<State> = Item::new("state");
+/// Deposits indexed by `(address, job_id, denomination)`.
+pub const BALANCES: Map<(&Addr, &JobId, &str), Uint128> = Map::new("deposit");
 
-pub const DEPOSIT: Map<(&[u8], &[u8]), Coin> = Map::new("deposit");
-
-pub const DEPOSIT_REVERSE: Map<(&[u8], &[u8]), bool> = Map::new("deposit_reverse");
-
-pub const JOB_ADDR: Map<(&[u8], U32Key), Addr> = Map::new("job_addr");
+/// A reverse index on [`BALANCES`].
+pub const BALANCES_BY_JOB_ID: Map<(&JobId, &Addr, &str), ()> = Map::new("deposit_reverse");

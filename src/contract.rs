@@ -1,19 +1,15 @@
+use crate::helpers::de::KeyDeserialize;
+use crate::msg::{ExecuteMsg, InstantiateMsg, JobId, JobInfo, QueryMsg, QueryResult};
+use crate::state::{BALANCES, BALANCES_BY_JOB_ID};
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    to_binary, Attribute, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Order,
-    Response, StdResult,
+    to_binary, Addr, BankMsg, Binary, Coin, CosmosMsg, Deps, DepsMut, Env, MessageInfo, Order,
+    Response, Uint128,
 };
 use cw2::set_contract_version;
-
-use crate::error::ContractError;
-use crate::error::ContractError::Invalidate;
-use crate::msg::{DepositInfo, ExecuteMsg, InstantiateMsg, JobInfo, QueryMsg};
-use crate::state::{DEPOSIT, DEPOSIT_REVERSE};
-
-// version info for migration info
-const CONTRACT_NAME: &str = "crates.io:turnstone";
-const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+use eyre::{ensure, Result};
+use std::collections::HashMap;
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -21,7 +17,9 @@ pub fn instantiate(
     _env: Env,
     info: MessageInfo,
     _msg: InstantiateMsg,
-) -> Result<Response, ContractError> {
+) -> Result<Response> {
+    const CONTRACT_NAME: &str = "crates.io:turnstone";
+    const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
     Ok(Response::new()
@@ -30,153 +28,123 @@ pub fn instantiate(
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn execute(
-    deps: DepsMut,
-    _env: Env,
-    info: MessageInfo,
-    msg: ExecuteMsg,
-) -> Result<Response, ContractError> {
+pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg) -> Result<Response> {
     match msg {
         ExecuteMsg::Deposit { job_id } => execute_deposit(deps, info, job_id),
         ExecuteMsg::Withdraw { withdraw_info } => execute_withdraw(deps, info, withdraw_info),
     }
 }
 
-fn execute_deposit(
-    deps: DepsMut,
-    info: MessageInfo,
-    job_id: String,
-) -> Result<Response, ContractError> {
-    if info.funds.len() != 1 || info.funds[0].amount.is_zero() {
-        return Err(Invalidate {});
+fn execute_deposit(deps: DepsMut, info: MessageInfo, job_id: JobId) -> Result<Response> {
+    let MessageInfo { sender, funds } = info;
+    let mut res = Response::new().add_attribute("method", "deposit");
+    let mut nonzero_funds = false;
+    for coin in funds.into_iter() {
+        nonzero_funds = nonzero_funds || !coin.amount.is_zero();
+        BALANCES.update(
+            deps.storage,
+            (&sender, &job_id, &coin.denom),
+            |balance| -> Result<Uint128> {
+                Ok(match balance {
+                    Some(balance) => balance + coin.amount,
+                    None => coin.amount,
+                })
+            },
+        )?;
+        BALANCES_BY_JOB_ID.save(deps.storage, (&job_id, &sender, &coin.denom), &())?;
+        res = res
+            .add_attribute("job_id", &job_id.0)
+            .add_attribute("denom", &coin.denom)
+            .add_attribute("amount", coin.amount);
     }
+    ensure!(nonzero_funds, "attempting to deposit 0 funds");
 
-    if DEPOSIT.has(deps.storage, (info.sender.as_bytes(), job_id.as_bytes())) {
-        return Err(Invalidate {});
-    }
-
-    DEPOSIT.save(
-        deps.storage,
-        (info.sender.as_bytes(), job_id.as_bytes()),
-        &info.funds[0],
-    )?;
-    DEPOSIT_REVERSE.save(
-        deps.storage,
-        (job_id.as_bytes(), info.sender.as_bytes()),
-        &true,
-    )?;
-
-    Ok(Response::new()
-        .add_attribute("method", "deposit")
-        .add_attribute("job_id", job_id)
-        .add_attribute("denom", info.funds[0].denom.to_string())
-        .add_attribute("amount", info.funds[0].amount.to_string()))
+    Ok(res)
 }
 
-fn execute_withdraw(
-    deps: DepsMut,
-    info: MessageInfo,
-    withdraw_info: Vec<DepositInfo>,
-) -> Result<Response, ContractError> {
-    if withdraw_info.is_empty() {
-        return Err(Invalidate {});
-    }
-    let mut attrs = Vec::new();
-    let mut coins = Vec::new();
-    for withdraw_info in withdraw_info {
-        let coin = DEPOSIT
+fn execute_withdraw(deps: DepsMut, info: MessageInfo, withdraws: Vec<JobInfo>) -> Result<Response> {
+    ensure!(!withdraws.is_empty(), "must execute some withdrawal");
+    let mut res = Response::new().add_attribute("method", "withdraw");
+    let mut coins = Vec::with_capacity(withdraws.len());
+    for withdraw in withdraws {
+        let amount = BALANCES
             .may_load(
                 deps.storage,
-                (info.sender.as_bytes(), withdraw_info.job_id.as_bytes()),
+                (&info.sender, &withdraw.job_id, &withdraw.coin.denom),
             )?
             .unwrap_or_default();
-        if coin.denom != withdraw_info.coin.denom {
-            return Err(Invalidate {});
-        }
-        if coin.amount == withdraw_info.coin.amount {
-            DEPOSIT.remove(
+        let amount = amount.checked_sub(withdraw.coin.amount)?;
+        if amount.is_zero() {
+            BALANCES.remove(
                 deps.storage,
-                (info.sender.as_bytes(), withdraw_info.job_id.as_bytes()),
+                (&info.sender, &withdraw.job_id, &withdraw.coin.denom),
             );
-            DEPOSIT_REVERSE.remove(
+            BALANCES_BY_JOB_ID.remove(
                 deps.storage,
-                (withdraw_info.job_id.as_bytes(), info.sender.as_bytes()),
+                (&withdraw.job_id, &info.sender, &withdraw.coin.denom),
             );
         } else {
-            DEPOSIT.update(
+            BALANCES.save(
                 deps.storage,
-                (info.sender.as_bytes(), withdraw_info.job_id.as_bytes()),
-                |coin| -> StdResult<_> {
-                    let mut coin = coin.unwrap();
-                    coin.amount -= withdraw_info.coin.amount;
-                    Ok(coin)
-                },
+                (&info.sender, &withdraw.job_id, &withdraw.coin.denom),
+                &amount,
             )?;
         }
-        attrs.push(Attribute {
-            key: "job_id".to_string(),
-            value: withdraw_info.job_id,
+        res = res
+            .add_attribute("job_id", withdraw.job_id.0)
+            .add_attribute("denom", &withdraw.coin.denom)
+            .add_attribute("amount", amount);
+        coins.push(Coin {
+            amount,
+            denom: withdraw.coin.denom.clone(),
         });
-        attrs.push(Attribute {
-            key: "denom".to_string(),
-            value: coin.denom,
-        });
-        attrs.push(Attribute {
-            key: "amount".to_string(),
-            value: coin.amount.to_string(),
-        });
-        coins.push(withdraw_info.coin);
     }
-    Ok(Response::new()
-        .add_attribute("method", "withdraw")
-        .add_attributes(attrs)
-        .add_message(CosmosMsg::Bank(BankMsg::Send {
-            to_address: info.sender.to_string(),
-            amount: coins,
-        })))
+    Ok(res.add_message(CosmosMsg::Bank(BankMsg::Send {
+        to_address: info.sender.to_string(),
+        amount: coins,
+    })))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
-    match msg {
-        QueryMsg::GetDepositInfo { address } => to_binary(&query_address_info(deps, address)?),
-        QueryMsg::GetJobInfo { job_id } => to_binary(&query_job_info(deps, job_id)?),
-    }
-}
-
-fn query_address_info(deps: Deps, address: String) -> StdResult<Vec<DepositInfo>> {
-    let all: StdResult<Vec<_>> = DEPOSIT
-        .prefix(address.as_bytes())
-        .range(deps.storage, None, None, Order::Ascending)
-        .collect();
-    let all = all.unwrap();
-    let mut result = Vec::new();
-    for item in all {
-        result.push(DepositInfo {
-            coin: item.1,
-            job_id: String::from_utf8(item.0).unwrap(),
-        });
-    }
-    Ok(result)
-}
-
-fn query_job_info(deps: Deps, job_id: String) -> StdResult<Vec<JobInfo>> {
-    let all: StdResult<Vec<_>> = DEPOSIT_REVERSE
-        .prefix(job_id.as_bytes())
-        .range(deps.storage, None, None, Order::Ascending)
-        .collect();
-    let all = all.unwrap();
-    let mut result = Vec::new();
-    for item in all {
-        if item.1 {
-            let coin = DEPOSIT
-                .may_load(deps.storage, (item.0.as_slice(), job_id.as_bytes()))?
-                .unwrap_or_default();
-            result.push(JobInfo {
-                coin,
-                address: String::from_utf8(item.0)?,
-            });
+pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> Result<Binary> {
+    Ok(to_binary(&match msg {
+        QueryMsg::GetDepositInfo { address } => {
+            QueryResult::Jobs(query_address_info(deps, &address)?)
         }
+        QueryMsg::GetJobInfo { job_id } => QueryResult::Balance(query_job_info(deps, &job_id)?),
+    })?)
+}
+
+/// Fetch the coins associated to every job under the given address.
+fn query_address_info(deps: Deps, address: &Addr) -> Result<Vec<JobInfo>> {
+    BALANCES
+        .sub_prefix(address)
+        .range(deps.storage, None, None, Order::Ascending)
+        .map(|item| {
+            let (key, amount) = item?;
+            let (job_id, denom) = <(JobId, String)>::from_slice(&key)?;
+            Ok(JobInfo {
+                coin: Coin { denom, amount },
+                job_id,
+            })
+        })
+        .collect()
+}
+
+/// Fetch the funds associated with a given `JobId`, summed by denomination.
+fn query_job_info(deps: Deps, job_id: &JobId) -> Result<Vec<Coin>> {
+    let mut balance: HashMap<String, Uint128> = HashMap::new();
+    for key in
+        BALANCES_BY_JOB_ID
+            .sub_prefix(job_id)
+            .keys(deps.storage, None, None, Order::Ascending)
+    {
+        let (address, denom) = <(Addr, String)>::from_vec(key)?;
+        let amount = BALANCES.load(deps.storage, (&address, job_id, &denom))?;
+        *balance.entry(denom).or_default() += amount;
     }
-    Ok(result)
+    Ok(balance
+        .into_iter()
+        .map(|(denom, amount)| Coin { amount, denom })
+        .collect())
 }
