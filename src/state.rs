@@ -11,7 +11,7 @@ pub struct State {
 }
 
 /// Deposits indexed by `(address, job_id, denomination)`.
-pub const BALANCES: Map<(&Addr, &JobId, &str), Uint128> = Map::new("deposit");
+pub const BALANCES: Map<(&Addr, &JobId, &str), Uint128> = Map::new("balances");
 
 /// A reverse index on [`BALANCES`].
-pub const BALANCES_BY_JOB_ID: Map<(&JobId, &Addr, &str), ()> = Map::new("deposit_reverse");
+pub const BALANCES_BY_JOB_ID: Map<(&JobId, &Addr, &str), ()> = Map::new("balances_by_job_id");
