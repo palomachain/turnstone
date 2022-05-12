@@ -44,9 +44,40 @@
         }
       },
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "with_consensus"
+      ],
+      "properties": {
+        "with_consensus": {
+          "type": "object",
+          "required": [
+            "raw_json",
+            "signatures"
+          ],
+          "properties": {
+            "raw_json": {
+              "type": "string"
+            },
+            "signatures": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/Signature"
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
     }
   ],
   "definitions": {
+    "Binary": {
+      "description": "Binary is a wrapper around Vec<u8> to add base64 de/serialization with serde. It also adds some helper methods to help encode inline.\n\nThis is only needed as serde-json-{core,wasm} has a horrible encoding for Vec<u8>",
+      "type": "string"
+    },
     "Coin": {
       "type": "object",
       "required": [
@@ -77,6 +108,24 @@
         },
         "job_id": {
           "$ref": "#/definitions/JobId"
+        }
+      }
+    },
+    "PubKey": {
+      "$ref": "#/definitions/Binary"
+    },
+    "Signature": {
+      "type": "object",
+      "required": [
+        "pubkey",
+        "signature"
+      ],
+      "properties": {
+        "pubkey": {
+          "$ref": "#/definitions/PubKey"
+        },
+        "signature": {
+          "$ref": "#/definitions/Binary"
         }
       }
     },

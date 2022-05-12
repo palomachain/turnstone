@@ -1,11 +1,21 @@
 use crate::helpers::de::KeyDeserialize;
-use cosmwasm_std::{Addr, Coin, StdResult};
+use crate::validation::{PubKey, Signature};
+use cosmwasm_std::{Addr, Coin, StdResult, Uint128};
 use cw_storage_plus::{Prefixer, PrimaryKey};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-pub struct InstantiateMsg {}
+pub struct InstantiateMsg {
+    pub validators: Vec<ValidatorWithAddress>,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct ValidatorWithAddress {
+    pub public_key: PubKey,
+    pub stake: Uint128,
+    pub address: Addr,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct JobId(pub String);
@@ -37,8 +47,23 @@ impl KeyDeserialize for JobId {
 #[derive(Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
-    Deposit { job_id: JobId },
-    Withdraw { withdraw_info: Vec<JobInfo> },
+    Deposit {
+        job_id: JobId,
+    },
+    Withdraw {
+        withdraw_info: Vec<JobInfo>,
+    },
+    WithConsensus {
+        raw_json: String,
+        signatures: Vec<Signature>,
+    },
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsensusMsg {
+    // None is a stub for tests.
+    None,
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq, JsonSchema)]

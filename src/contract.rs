@@ -1,6 +1,7 @@
 use crate::helpers::de::KeyDeserialize;
-use crate::msg::{ExecuteMsg, InstantiateMsg, JobId, JobInfo, QueryMsg, QueryResult};
+use crate::msg::{ConsensusMsg, ExecuteMsg, InstantiateMsg, JobId, JobInfo, QueryMsg, QueryResult};
 use crate::state::{BALANCES, BALANCES_BY_JOB_ID};
+use crate::validation::{validate_json, Validator, TRUSTED_ADDRESSES, VALIDATORS};
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
@@ -16,11 +17,29 @@ pub fn instantiate(
     deps: DepsMut,
     _env: Env,
     info: MessageInfo,
-    _msg: InstantiateMsg,
+    msg: InstantiateMsg,
 ) -> Result<Response> {
     const CONTRACT_NAME: &str = "crates.io:turnstone";
     const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+
+    let (mut validators, mut addresses): (Vec<_>, Vec<_>) = msg
+        .validators
+        .into_iter()
+        .map(|val| {
+            (
+                Validator {
+                    pubkey: val.public_key,
+                    stake: val.stake,
+                },
+                val.address,
+            )
+        })
+        .unzip();
+    addresses.sort();
+    validators.sort_by(|v1, v2| v1.pubkey.cmp(&v2.pubkey));
+    TRUSTED_ADDRESSES.save(deps.storage, &addresses)?;
+    VALIDATORS.save(deps.storage, &validators)?;
 
     Ok(Response::new()
         .add_attribute("method", "instantiate")
@@ -32,6 +51,16 @@ pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg) -> 
     match msg {
         ExecuteMsg::Deposit { job_id } => execute_deposit(deps, info, job_id),
         ExecuteMsg::Withdraw { withdraw_info } => execute_withdraw(deps, info, withdraw_info),
+        ExecuteMsg::WithConsensus {
+            raw_json,
+            signatures,
+        } => match validate_json(deps.as_ref(), &info, &raw_json, &signatures)? {
+            ConsensusMsg::None => {
+                // TODO: update_valset
+                // TODO: execute_external_contract https://github.com/palomachain/paloma/issues/109
+                Ok(Response::new())
+            }
+        },
     }
 }
 
