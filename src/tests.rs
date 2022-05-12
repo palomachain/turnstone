@@ -1,16 +1,16 @@
 use crate::contract::{execute, instantiate};
 use crate::msg::{
-    ExecuteMsg, InstantiateMsg, JobId, JobInfo, QueryMsg, QueryResult, ValidatorWithAddress,
+    ExecuteMsg, InstantiateMsg, JobId, JobInfo, QueryMsg, QueryResult, ValidatorWithAddresses,
 };
+use crate::validation;
 use crate::validation::{PubKey, Signature};
 use cosmwasm_std::testing::{mock_dependencies_with_balances, mock_env, mock_info};
 use cosmwasm_std::{from_binary, Addr, Api, Binary, Coin, Deps, Env, Uint128};
 use eyre::Result;
+use rand::RngCore;
 use secp256k1::rand::thread_rng;
 use secp256k1::{generate_keypair, Message, SecretKey};
 use serde_json::json;
-use sha2::Digest;
-use sha2::Sha256;
 
 fn job_id(id: i32) -> JobId {
     JobId(id.to_string())
@@ -221,12 +221,10 @@ fn simple_validation() -> Result<()> {
         (privkey, pubkey)
     }
 
-    fn sign(privkey: &SecretKey, addr: &Addr, raw_json: &str) -> Result<Binary> {
-        let hash = Sha256::new()
-            .chain_update(raw_json.as_bytes())
-            .chain_update(addr.as_bytes())
-            .finalize();
-        let sig = privkey.sign_ecdsa(Message::from_slice(&hash)?);
+    fn sign(privkey: &SecretKey, message_id: &str, raw_json: &str) -> Result<Binary> {
+        let sig = privkey.sign_ecdsa(Message::from_slice(&validation::hash(
+            message_id, raw_json,
+        ))?);
         Ok(Binary::from(sig.serialize_compact()))
     }
 
@@ -247,47 +245,61 @@ fn simple_validation() -> Result<()> {
             validators: addresses
                 .iter()
                 .zip(&keys)
-                .map(|(addr, (_, pubkey))| ValidatorWithAddress {
+                .map(|(addr, (_, pubkey))| ValidatorWithAddresses {
                     public_key: pubkey.clone(),
                     stake: Uint128::new(10),
-                    address: addr.clone(),
+                    address: vec![addr.clone()],
                 })
                 .collect(),
         },
     )?;
 
-    let mut t = |addr: &Addr, keys: &[(SecretKey, PubKey)]| -> Result<()> {
-        let valid_json = json!({ "none": () }).to_string();
-        execute(
-            deps.as_mut(),
-            mock_env(),
-            mock_info(addr.as_str(), &[]),
-            ExecuteMsg::WithConsensus {
-                raw_json: valid_json.to_string(),
-                signatures: keys
-                    .iter()
-                    .map(|(privkey, pubkey)| {
-                        Ok(Signature {
-                            pubkey: pubkey.clone(),
-                            signature: sign(&privkey, &addr, &valid_json)?,
+    let mut t =
+        |addr: &Addr, message_id: Option<&str>, keys: &[(SecretKey, PubKey)]| -> Result<()> {
+            let message_id = message_id
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| rand::thread_rng().next_u64().to_string());
+            let valid_json = json!({ "none": () }).to_string();
+            execute(
+                deps.as_mut(),
+                mock_env(),
+                mock_info(addr.as_str(), &[]),
+                ExecuteMsg::WithConsensus {
+                    message_id: message_id.clone(),
+                    raw_json: valid_json.to_string(),
+                    signatures: keys
+                        .iter()
+                        .map(|(privkey, pubkey)| {
+                            Ok(Signature {
+                                pubkey: pubkey.clone(),
+                                signature: sign(&privkey, &message_id, &valid_json)?,
+                            })
                         })
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            },
-        )?;
-        Ok(())
-    };
+                        .collect::<Result<Vec<_>>>()?,
+                },
+            )?;
+            Ok(())
+        };
 
-    // Validators can execute just fine.
-    t(&addresses[0], &[])?;
-    // Non validators can't. Even with exactly half.
-    for n in 0..=5 {
-        assert!(t(&non_validator, &keys[..n]).is_err());
+    // No messages validate with less than quorum. Exactly half is not quorum.
+    for addr in [&addresses[0], &non_validator] {
+        for n in 0..=5 {
+            assert!(t(addr, None, &keys[..n]).is_err());
+        }
     }
-    // Unless they have enough signatures.
-    for n in 6..10 {
-        t(&non_validator, &keys[..n])?;
+    // Non trusted addreses never work.
+    for n in 0..=keys.len() {
+        assert!(t(&non_validator, None, &keys[..n]).is_err());
     }
+    // Trusted addreses do, if they have enough signatures.
+    for addr in &addresses {
+        for n in 6..10 {
+            t(addr, None, &keys[..n])?;
+        }
+    }
+    // But not if you try to reuse an id!
+    t(&addresses[0], Some("😠"), &keys)?;
+    assert!(t(&addresses[0], Some("😠"), &keys).is_err());
 
     Ok(())
 }

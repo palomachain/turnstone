@@ -54,10 +54,14 @@
         "with_consensus": {
           "type": "object",
           "required": [
+            "message_id",
             "raw_json",
             "signatures"
           ],
           "properties": {
+            "message_id": {
+              "type": "string"
+            },
             "raw_json": {
               "type": "string"
             },

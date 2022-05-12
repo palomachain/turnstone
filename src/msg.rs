@@ -7,14 +7,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct InstantiateMsg {
-    pub validators: Vec<ValidatorWithAddress>,
+    pub validators: Vec<ValidatorWithAddresses>,
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-pub struct ValidatorWithAddress {
+pub struct ValidatorWithAddresses {
     pub public_key: PubKey,
     pub stake: Uint128,
-    pub address: Addr,
+    pub address: Vec<Addr>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -54,6 +54,7 @@ pub enum ExecuteMsg {
         withdraw_info: Vec<JobInfo>,
     },
     WithConsensus {
+        message_id: String,
         raw_json: String,
         signatures: Vec<Signature>,
     },

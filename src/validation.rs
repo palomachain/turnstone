@@ -1,13 +1,20 @@
+///! Routines and storage associated with validating messages.
 use cosmwasm_std::{Addr, Binary, Deps, MessageInfo, Uint128};
-use cw_storage_plus::Item;
+use cw_storage_plus::{Item, Map};
 use eyre::{ensure, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// A list of public keys and their associated stake in our chain.
 pub const VALIDATORS: Item<Vec<Validator>> = Item::new("validators");
 
+/// Addresses associated with our validators. Only these addresses may issue
+/// [`ExecuteMsg::WithConsensus`] messages.
 pub const TRUSTED_ADDRESSES: Item<Vec<Addr>> = Item::new("trusted_addreses");
+
+/// Messages may not be replayed with the same `id`.
+pub const USED_MESSAGE_IDS: Map<&str, ()> = Map::new("used_message_ids");
 
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, Ord, PartialEq, PartialOrd, JsonSchema)]
 pub struct PubKey(pub Binary);
@@ -29,18 +36,23 @@ fn is_trusted(deps: Deps, address: &Addr) -> Result<bool> {
     Ok(trusted.binary_search(address).is_ok())
 }
 
+/// Concatenate `raw_json` with `message_id`, used as a nonce and hash them for signing.
+pub(crate) fn hash(message_id: &str, raw_json: &str) -> Vec<u8> {
+    // TODO: Delimit these messages.
+    Sha256::new()
+        .chain_update(raw_json.as_bytes())
+        .chain_update(message_id)
+        .finalize()
+        .to_vec()
+}
+
 fn is_signed<'a>(
     deps: Deps,
-    info: &MessageInfo,
+    message_id: &str,
     raw_json: &'a str,
     signatures: &[Signature],
 ) -> Result<bool> {
-    // XXX: This is almost the definition of asking for a chosen prefix attack.
-    // @mm can we use a better scheme here?
-    let message_hash = Sha256::new()
-        .chain_update(raw_json.as_bytes())
-        .chain_update(info.sender.as_bytes())
-        .finalize();
+    let message_hash = hash(message_id, raw_json);
     let validators = VALIDATORS.load(deps.storage)?;
     let total = validators.iter().map(|v| v.stake).sum::<Uint128>();
 
@@ -55,6 +67,7 @@ fn is_signed<'a>(
             }
         })
         .collect();
+    // Sort big weights first.
     signatures.sort_by(|(w1, _), (w2, _)| w2.cmp(w1));
     let mut total_weight = Uint128::new(0);
     for (weight, sig) in signatures {
@@ -75,6 +88,7 @@ fn is_signed<'a>(
 pub(crate) fn validate_json<'a, T>(
     deps: Deps,
     info: &MessageInfo,
+    message_id: &str,
     raw_json: &'a str,
     signatures: &[Signature],
 ) -> Result<T>
@@ -82,8 +96,13 @@ where
     T: Deserialize<'a>,
 {
     ensure!(
-        is_trusted(deps, &info.sender)? || is_signed(deps, info, raw_json, signatures)?,
-        "forbidden"
+        !USED_MESSAGE_IDS.has(deps.storage, message_id),
+        "previously used message_id"
+    );
+    ensure!(is_trusted(deps, &info.sender)?, "forbidden");
+    ensure!(
+        is_signed(deps, message_id, raw_json, signatures)?,
+        "unauthorized"
     );
     Ok(serde_json::from_str(raw_json)?)
 }

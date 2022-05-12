@@ -1,7 +1,9 @@
 use crate::helpers::de::KeyDeserialize;
 use crate::msg::{ConsensusMsg, ExecuteMsg, InstantiateMsg, JobId, JobInfo, QueryMsg, QueryResult};
 use crate::state::{BALANCES, BALANCES_BY_JOB_ID};
-use crate::validation::{validate_json, Validator, TRUSTED_ADDRESSES, VALIDATORS};
+use crate::validation::{
+    validate_json, Validator, TRUSTED_ADDRESSES, USED_MESSAGE_IDS, VALIDATORS,
+};
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
@@ -10,6 +12,7 @@ use cosmwasm_std::{
 };
 use cw2::set_contract_version;
 use eyre::{ensure, Result};
+use itertools::Itertools;
 use std::collections::HashMap;
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -23,7 +26,7 @@ pub fn instantiate(
     const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
-    let (mut validators, mut addresses): (Vec<_>, Vec<_>) = msg
+    let (mut validators, addresses): (Vec<_>, Vec<_>) = msg
         .validators
         .into_iter()
         .map(|val| {
@@ -36,6 +39,7 @@ pub fn instantiate(
             )
         })
         .unzip();
+    let mut addresses = addresses.into_iter().concat();
     addresses.sort();
     validators.sort_by(|v1, v2| v1.pubkey.cmp(&v2.pubkey));
     TRUSTED_ADDRESSES.save(deps.storage, &addresses)?;
@@ -52,15 +56,21 @@ pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg) -> 
         ExecuteMsg::Deposit { job_id } => execute_deposit(deps, info, job_id),
         ExecuteMsg::Withdraw { withdraw_info } => execute_withdraw(deps, info, withdraw_info),
         ExecuteMsg::WithConsensus {
+            message_id,
             raw_json,
             signatures,
-        } => match validate_json(deps.as_ref(), &info, &raw_json, &signatures)? {
-            ConsensusMsg::None => {
-                // TODO: update_valset
-                // TODO: execute_external_contract https://github.com/palomachain/paloma/issues/109
-                Ok(Response::new())
+        } => {
+            let consensus_msg =
+                validate_json(deps.as_ref(), &info, &message_id, &raw_json, &signatures)?;
+            USED_MESSAGE_IDS.save(deps.storage, &message_id, &())?;
+            match consensus_msg {
+                ConsensusMsg::None => {
+                    // TODO: update_valset
+                    // TODO: execute_external_contract https://github.com/palomachain/paloma/issues/109
+                    Ok(Response::new())
+                }
             }
-        },
+        }
     }
 }
 
