@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct InstantiateMsg {
-    pub validators: Vec<ValidatorWithAddresses>,
+    pub valset: Vec<Validator>,
 }
 
-#[derive(Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-pub struct ValidatorWithAddresses {
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct Validator {
     pub public_key: PubKey,
     pub stake: Uint128,
     pub address: Vec<Addr>,
@@ -60,11 +60,11 @@ pub enum ExecuteMsg {
     },
 }
 
-#[derive(Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConsensusMsg {
-    // None is a stub for tests.
-    None,
+    Stub {},
+    UpdateValset { valset: Vec<Validator> },
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq, JsonSchema)]
