@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// A list of public keys and their associated stake in our chain.
-pub const VALIDATORS: Item<Vec<Validator>> = Item::new("validators");
+pub const VALIDATORS: Item<Vec<ValKey>> = Item::new("validators");
 
 /// Addresses associated with our validators. Only these addresses may issue
 /// [`ExecuteMsg::WithConsensus`] messages.
@@ -20,7 +20,7 @@ pub const USED_MESSAGE_IDS: Map<&str, ()> = Map::new("used_message_ids");
 pub struct PubKey(pub Binary);
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct Validator {
+pub struct ValKey {
     pub pubkey: PubKey,
     pub stake: Uint128,
 }

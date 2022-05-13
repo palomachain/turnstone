@@ -1,16 +1,14 @@
 use crate::contract::{execute, instantiate};
 use crate::msg::{
-    ExecuteMsg, InstantiateMsg, JobId, JobInfo, QueryMsg, QueryResult, ValidatorWithAddresses,
+    ConsensusMsg, ExecuteMsg, InstantiateMsg, JobId, JobInfo, QueryMsg, QueryResult, Validator,
 };
 use crate::validation;
 use crate::validation::{PubKey, Signature};
 use cosmwasm_std::testing::{mock_dependencies_with_balances, mock_env, mock_info};
-use cosmwasm_std::{from_binary, Addr, Api, Binary, Coin, Deps, Env, Uint128};
+use cosmwasm_std::{from_binary, Addr, Api, Binary, Coin, Deps, DepsMut, Env, Uint128};
 use eyre::Result;
-use rand::RngCore;
 use secp256k1::rand::thread_rng;
 use secp256k1::{generate_keypair, Message, SecretKey};
-use serde_json::json;
 
 fn job_id(id: i32) -> JobId {
     JobId(id.to_string())
@@ -36,7 +34,7 @@ fn simple_deposit_query_withdraw() -> Result<()> {
         deps.as_mut(),
         mock_env(),
         mock_info("creator", &[]),
-        InstantiateMsg { validators: vec![] },
+        InstantiateMsg { valset: vec![] },
     )?;
 
     let addr_a = deps.api.addr_validate("aaa")?;
@@ -149,7 +147,7 @@ fn deposit_withdraw_errors() -> Result<()> {
         deps.as_mut(),
         mock_env(),
         mock_info("creator", &[]),
-        InstantiateMsg { validators: vec![] },
+        InstantiateMsg { valset: vec![] },
     )?;
 
     let addr_a = deps.api.addr_validate("aaa")?;
@@ -215,17 +213,39 @@ fn deposit_withdraw_errors() -> Result<()> {
 fn simple_validation() -> Result<()> {
     let mut deps = mock_dependencies_with_balances(&[]);
 
-    fn keys() -> (SecretKey, PubKey) {
+    fn gen_keys() -> (SecretKey, PubKey) {
         let (privkey, pubkey) = generate_keypair(&mut thread_rng());
         let pubkey = PubKey(Binary::from(pubkey.serialize()));
         (privkey, pubkey)
     }
 
-    fn sign(privkey: &SecretKey, message_id: &str, raw_json: &str) -> Result<Binary> {
-        let sig = privkey.sign_ecdsa(Message::from_slice(&validation::hash(
-            message_id, raw_json,
-        ))?);
-        Ok(Binary::from(sig.serialize_compact()))
+    let mut base_message_id: u64 = 0xBA5EBA11 - 1;
+    // Generate a unique message id.
+    let mut mid = || -> String {
+        base_message_id += 1;
+        format!("{:x}", base_message_id)
+    };
+
+    fn sign(
+        keys: &[(SecretKey, PubKey)],
+        message_id: &str,
+        raw_json: &str,
+    ) -> Result<Vec<Signature>> {
+        Ok(keys
+            .iter()
+            .map(|(privkey, pubkey)| {
+                Ok(Signature {
+                    pubkey: pubkey.clone(),
+                    signature: Binary::from(
+                        privkey
+                            .sign_ecdsa(Message::from_slice(&validation::hash(
+                                message_id, raw_json,
+                            ))?)
+                            .serialize_compact(),
+                    ),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?)
     }
 
     let addresses: Vec<_> = [
@@ -235,17 +255,17 @@ fn simple_validation() -> Result<()> {
     .map(|addr| Ok(deps.api.addr_validate(addr)?))
     .collect::<Result<_>>()?;
     let non_validator = deps.api.addr_validate("eve")?;
-    let keys: Vec<_> = addresses.iter().map(|_| keys()).collect();
+    let keys: Vec<_> = addresses.iter().map(|_| gen_keys()).collect();
 
     let _ = instantiate(
         deps.as_mut(),
         mock_env(),
         mock_info("creator", &[]),
         InstantiateMsg {
-            validators: addresses
+            valset: addresses
                 .iter()
                 .zip(&keys)
-                .map(|(addr, (_, pubkey))| ValidatorWithAddresses {
+                .map(|(addr, (_, pubkey))| Validator {
                     public_key: pubkey.clone(),
                     stake: Uint128::new(10),
                     address: vec![addr.clone()],
@@ -254,52 +274,71 @@ fn simple_validation() -> Result<()> {
         },
     )?;
 
-    let mut t =
-        |addr: &Addr, message_id: Option<&str>, keys: &[(SecretKey, PubKey)]| -> Result<()> {
-            let message_id = message_id
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| rand::thread_rng().next_u64().to_string());
-            let valid_json = json!({ "none": () }).to_string();
-            execute(
-                deps.as_mut(),
-                mock_env(),
-                mock_info(addr.as_str(), &[]),
-                ExecuteMsg::WithConsensus {
-                    message_id: message_id.clone(),
-                    raw_json: valid_json.to_string(),
-                    signatures: keys
-                        .iter()
-                        .map(|(privkey, pubkey)| {
-                            Ok(Signature {
-                                pubkey: pubkey.clone(),
-                                signature: sign(&privkey, &message_id, &valid_json)?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>>>()?,
-                },
-            )?;
-            Ok(())
-        };
+    let t = |deps: DepsMut,
+             addr: &Addr,
+             message_id: &str,
+             keys: &[(SecretKey, PubKey)]|
+     -> Result<()> {
+        let valid_json = r#"{"stub": {}}"#;
+        execute(
+            deps,
+            mock_env(),
+            mock_info(addr.as_str(), &[]),
+            ExecuteMsg::WithConsensus {
+                message_id: message_id.to_string(),
+                raw_json: valid_json.to_string(),
+                signatures: sign(&keys, &message_id, &valid_json)?,
+            },
+        )?;
+        Ok(())
+    };
 
     // No messages validate with less than quorum. Exactly half is not quorum.
     for addr in [&addresses[0], &non_validator] {
         for n in 0..=5 {
-            assert!(t(addr, None, &keys[..n]).is_err());
+            assert!(t(deps.as_mut(), addr, &mid(), &keys[..n]).is_err());
         }
     }
     // Non trusted addreses never work.
     for n in 0..=keys.len() {
-        assert!(t(&non_validator, None, &keys[..n]).is_err());
+        assert!(t(deps.as_mut(), &non_validator, &mid(), &keys[..n]).is_err());
     }
     // Trusted addreses do, if they have enough signatures.
     for addr in &addresses {
         for n in 6..10 {
-            t(addr, None, &keys[..n])?;
+            t(deps.as_mut(), addr, &mid(), &keys[..n])?;
         }
     }
     // But not if you try to reuse an id!
-    t(&addresses[0], Some("😠"), &keys)?;
-    assert!(t(&addresses[0], Some("😠"), &keys).is_err());
+    t(deps.as_mut(), &addresses[0], "😠", &keys)?;
+    assert!(t(deps.as_mut(), &addresses[0], "😠", &keys).is_err());
+
+    // And if you change the valset...
+    let new_addr = deps.api.addr_validate("new_hotness")?;
+    let (privkey, pubkey) = gen_keys();
+    let update_json = serde_json::to_string(&ConsensusMsg::UpdateValset {
+        valset: vec![Validator {
+            public_key: pubkey.clone(),
+            stake: Uint128::new(100),
+            address: vec![new_addr.clone()],
+        }],
+    })?;
+    let message_id = mid();
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info(&addresses[0].as_str(), &[]),
+        ExecuteMsg::WithConsensus {
+            message_id: message_id.clone(),
+            raw_json: update_json.to_string(),
+            signatures: sign(&keys, &message_id, &update_json.to_string())?,
+        },
+    )?;
+
+    // Then they can sign new messages
+    t(deps.as_mut(), &new_addr, &mid(), &[(privkey, pubkey)])?;
+    // But others can't.
+    assert!(t(deps.as_mut(), &addresses[0], &mid(), &keys).is_err());
 
     Ok(())
 }

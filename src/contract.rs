@@ -1,9 +1,9 @@
 use crate::helpers::de::KeyDeserialize;
-use crate::msg::{ConsensusMsg, ExecuteMsg, InstantiateMsg, JobId, JobInfo, QueryMsg, QueryResult};
-use crate::state::{BALANCES, BALANCES_BY_JOB_ID};
-use crate::validation::{
-    validate_json, Validator, TRUSTED_ADDRESSES, USED_MESSAGE_IDS, VALIDATORS,
+use crate::msg::{
+    ConsensusMsg, ExecuteMsg, InstantiateMsg, JobId, JobInfo, QueryMsg, QueryResult, Validator,
 };
+use crate::state::{BALANCES, BALANCES_BY_JOB_ID};
+use crate::validation::{validate_json, ValKey, TRUSTED_ADDRESSES, USED_MESSAGE_IDS, VALIDATORS};
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
@@ -26,24 +26,7 @@ pub fn instantiate(
     const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
-    let (mut validators, addresses): (Vec<_>, Vec<_>) = msg
-        .validators
-        .into_iter()
-        .map(|val| {
-            (
-                Validator {
-                    pubkey: val.public_key,
-                    stake: val.stake,
-                },
-                val.address,
-            )
-        })
-        .unzip();
-    let mut addresses = addresses.into_iter().concat();
-    addresses.sort();
-    validators.sort_by(|v1, v2| v1.pubkey.cmp(&v2.pubkey));
-    TRUSTED_ADDRESSES.save(deps.storage, &addresses)?;
-    VALIDATORS.save(deps.storage, &validators)?;
+    update_valset(deps, msg.valset)?;
 
     Ok(Response::new()
         .add_attribute("method", "instantiate")
@@ -62,10 +45,12 @@ pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg) -> 
         } => {
             let consensus_msg =
                 validate_json(deps.as_ref(), &info, &message_id, &raw_json, &signatures)?;
+            // Mark this message_id as used. Messages that fail later in the process will
+            // still be able to be replayed, as this store will not be executed.
             USED_MESSAGE_IDS.save(deps.storage, &message_id, &())?;
             match consensus_msg {
-                ConsensusMsg::None => {
-                    // TODO: update_valset
+                ConsensusMsg::UpdateValset { valset } => update_valset(deps, valset),
+                ConsensusMsg::Stub {} => {
                     // TODO: execute_external_contract https://github.com/palomachain/paloma/issues/109
                     Ok(Response::new())
                 }
@@ -142,6 +127,27 @@ fn execute_withdraw(deps: DepsMut, info: MessageInfo, withdraws: Vec<JobInfo>) -
         to_address: info.sender.to_string(),
         amount: coins,
     })))
+}
+
+fn update_valset(deps: DepsMut, valset: Vec<Validator>) -> Result<Response> {
+    let (mut validators, addresses): (Vec<_>, Vec<_>) = valset
+        .into_iter()
+        .map(|val| {
+            (
+                ValKey {
+                    pubkey: val.public_key,
+                    stake: val.stake,
+                },
+                val.address,
+            )
+        })
+        .unzip();
+    let mut addresses = addresses.into_iter().concat();
+    addresses.sort();
+    validators.sort_by(|v1, v2| v1.pubkey.cmp(&v2.pubkey));
+    TRUSTED_ADDRESSES.save(deps.storage, &addresses)?;
+    VALIDATORS.save(deps.storage, &validators)?;
+    Ok(Response::new().add_attribute("method", "update_valset"))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
